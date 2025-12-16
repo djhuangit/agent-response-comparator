@@ -314,7 +314,7 @@ export default function App() {
     <div className="min-h-screen bg-gray-900 text-white p-3">
       <div className="bg-gray-800 rounded-lg p-3 mb-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <h1 className="text-base font-bold">Agent Data Flow</h1>
+          <h1 className="text-base font-bold">Agent Response Comparator</h1>
 
           {/* Auth buttons */}
           <SignedOut>
