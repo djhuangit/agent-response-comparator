@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation } from "convex/react";
 import { useConvexAuth } from "convex/react";
 import { api } from "../convex/_generated/api";
+import { Id } from "../convex/_generated/dataModel";
 import {
   SignedIn,
   SignedOut,
@@ -10,291 +11,110 @@ import {
   useUser
 } from "@clerk/clerk-react";
 
-// Type definitions
-interface FieldValue {
-  field: string;
-  value: string;
-}
-
-interface StageData {
-  orchestratorOut: FieldValue[];
-  searchIn: FieldValue[];
-  searchOut: FieldValue[];
-  screeningIn: FieldValue[];
-}
-
-interface InputFields {
-  orchestratorOut: string;
-  searchIn: string;
-  searchOut: string;
-  screeningIn: string;
-}
-
-type StageKey = keyof StageData;
-
-// Convex record type (includes _id and _creationTime from database)
-interface ConvexTestRecord {
-  _id: string;
-  _creationTime: number;
-  userId: string;
-  testName: string;
-  createdAt: number;
-  data: StageData;
-}
-
-interface YamlObject {
-  [key: string]: YamlValue;
-}
-
-type YamlValue = string | number | boolean | null | YamlObject | YamlValue[];
-
-const parseYaml = (text: string): YamlObject => {
-  const lines = text.split('\n');
-  const result: YamlObject = {};
-  const stack: Array<{ obj: YamlObject | YamlValue[]; indent: number }> = [{ obj: result, indent: -1 }];
-
-  for (const line of lines) {
-    if (!line.trim() || line.trim().startsWith('#')) continue;
-
-    const indent = line.search(/\S/);
-    const content = line.trim();
-
-    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
-      stack.pop();
-    }
-
-    const parent = stack[stack.length - 1].obj;
-
-    if (content.startsWith('- ')) {
-      const itemContent = content.slice(2);
-      if (!Array.isArray(parent)) {
-        const keys = Object.keys(parent as YamlObject);
-        const lastKey = keys[keys.length - 1];
-        const parentObj = parent as YamlObject;
-        if (parentObj[lastKey] === null || parentObj[lastKey] === undefined) {
-          parentObj[lastKey] = [];
-        }
-        if (Array.isArray(parentObj[lastKey])) {
-          const arr = parentObj[lastKey] as YamlValue[];
-          if (itemContent.includes(': ')) {
-            const obj: YamlObject = {};
-            const [k, ...v] = itemContent.split(': ');
-            obj[k] = v.join(': ');
-            arr.push(obj);
-            stack.push({ obj: obj, indent: indent });
-          } else {
-            arr.push(itemContent);
-          }
-        }
-      }
-    } else if (content.includes(': ')) {
-      const colonIdx = content.indexOf(': ');
-      const key = content.slice(0, colonIdx);
-      const value = content.slice(colonIdx + 2);
-
-      if (value === '' || value === '|') {
-        (parent as YamlObject)[key] = {};
-        stack.push({ obj: (parent as YamlObject)[key] as YamlObject, indent: indent });
-      } else {
-        (parent as YamlObject)[key] = value;
-      }
-    }
-  }
-
-  return result;
-};
-
-const flattenObject = (obj: YamlValue, prefix: string = '', maxArrayItems: number | null = null): FieldValue[] => {
-  const result: FieldValue[] = [];
-
-  if (obj === null || obj === undefined) {
-    result.push({ field: prefix || 'value', value: 'null' });
-    return result;
-  }
-
-  if (typeof obj !== 'object') {
-    result.push({ field: prefix || 'value', value: String(obj) });
-    return result;
-  }
-
-  if (Array.isArray(obj)) {
-    if (obj.length === 0) {
-      result.push({ field: prefix, value: '[]' });
-    } else if (typeof obj[0] === 'object' && obj[0] !== null) {
-      result.push({ field: `${prefix} (count)`, value: `${obj.length} items` });
-      const itemsToShow = maxArrayItems ? obj.slice(0, maxArrayItems) : obj;
-      itemsToShow.forEach((item, idx) => {
-        result.push(...flattenObject(item, `${prefix}[${idx}]`, maxArrayItems));
-      });
-      if (maxArrayItems && obj.length > maxArrayItems) {
-        result.push({ field: `${prefix}[...]`, value: `... ${obj.length - maxArrayItems} more items` });
-      }
-    } else {
-      result.push({ field: prefix, value: obj.join('\n') });
-    }
-    return result;
-  }
-
-  for (const key in obj as YamlObject) {
-    const value = (obj as YamlObject)[key];
-    const newKey = prefix ? `${prefix}.${key}` : key;
-
-    if (value === null || value === undefined) {
-      result.push({ field: newKey, value: 'null' });
-    } else if (Array.isArray(value)) {
-      if (value.length === 0) {
-        result.push({ field: newKey, value: '[]' });
-      } else if (typeof value[0] === 'object' && value[0] !== null) {
-        result.push({ field: `${newKey} (count)`, value: `${value.length} items` });
-        const itemsToShow = maxArrayItems ? value.slice(0, maxArrayItems) : value;
-        itemsToShow.forEach((item, idx) => {
-          result.push(...flattenObject(item, `${newKey}[${idx}]`, maxArrayItems));
-        });
-        if (maxArrayItems && value.length > maxArrayItems) {
-          result.push({ field: `${newKey}[...]`, value: `... ${value.length - maxArrayItems} more items` });
-        }
-      } else {
-        result.push({ field: newKey, value: (value as string[]).join('\n') });
-      }
-    } else if (typeof value === 'object') {
-      result.push(...flattenObject(value, newKey, maxArrayItems));
-    } else {
-      result.push({ field: newKey, value: String(value) });
-    }
-  }
-  return result;
-};
-
-const DataTable = ({ data }: { data: FieldValue[] }) => {
-  if (!data || data.length === 0) {
-    return <div className="text-gray-400 italic p-4 text-center">No data yet</div>;
-  }
-
-  return (
-    <div className="overflow-auto max-h-96">
-      <table className="w-full text-xs border-collapse">
-        <thead className="sticky top-0">
-          <tr className="bg-gray-700 text-white">
-            <th className="text-left p-1.5 border border-gray-600 font-medium w-2/5">Field</th>
-            <th className="text-left p-1.5 border border-gray-600 font-medium">Value</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.map((row, idx) => (
-            <tr key={idx} className={idx % 2 === 0 ? 'bg-gray-800' : 'bg-gray-750'}>
-              <td className="p-1.5 border border-gray-700 font-mono text-blue-300 align-top">{row.field}</td>
-              <td className="p-1.5 border border-gray-700 text-gray-200 break-all align-top whitespace-pre-wrap">{row.value}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-};
-
-const ConsolidatedTable = ({
-  records,
-  stage
-}: {
-  records: ConvexTestRecord[];
-  stage: StageKey;
-}) => {
-  if (records.length === 0) {
-    return <div className="text-gray-400 italic p-4 text-center">No records added yet. Parse data and click "+ Add" to add tests.</div>;
-  }
-
-  const allFields = new Set<string>();
-  records.forEach(r => {
-    r.data[stage]?.forEach(row => allFields.add(row.field));
-  });
-  const fields = Array.from(allFields);
-
-  const testLookups = records.map(r => {
-    const lookup: Record<string, string> = {};
-    r.data[stage]?.forEach(row => { lookup[row.field] = row.value; });
-    return lookup;
-  });
-
-  return (
-    <div className="overflow-auto max-h-[600px]">
-      <table className="w-full text-xs border-collapse">
-        <thead className="sticky top-0">
-          <tr className="bg-gray-700 text-white">
-            <th className="text-left p-1.5 border border-gray-600 font-medium min-w-48">Field</th>
-            {records.map((r) => (
-              <th key={r._id} className="text-left p-1.5 border border-gray-600 font-medium min-w-40">{r.testName}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {fields.map((field, idx) => (
-            <tr key={idx} className={idx % 2 === 0 ? 'bg-gray-800' : 'bg-gray-750'}>
-              <td className="p-1.5 border border-gray-700 font-mono text-blue-300 align-top">{field}</td>
-              {testLookups.map((lookup, i) => (
-                <td key={records[i]._id} className="p-1.5 border border-gray-700 text-gray-200 break-all align-top whitespace-pre-wrap max-w-xs">
-                  {lookup[field] || '—'}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-};
+import { FieldValue, Evaluation, TestRecord } from './types/evaluation';
+import { parseYaml } from './utils/yamlParser';
+import { flattenObject } from './utils/dataFlattener';
+import { EvaluationSelector } from './components/evaluation/EvaluationSelector';
+import { EvaluationManager } from './components/evaluation/EvaluationManager';
+import { DynamicInputPanel } from './components/input/DynamicInputPanel';
+import { DynamicTablesView } from './components/tables/DynamicTablesView';
+import { ConsolidatedTable } from './components/comparison/ConsolidatedTable';
 
 export default function App() {
   const { isAuthenticated, isLoading } = useConvexAuth();
   const { user } = useUser();
 
-  // Replace useState for records with Convex query
-  const records = useQuery(
-    api.testRecords.getUserRecords,
+  // Evaluation state
+  const [currentEvaluationId, setCurrentEvaluationId] = useState<Id<"evaluations"> | null>(null);
+  const [showEvaluationManager, setShowEvaluationManager] = useState(false);
+  const [editingEvaluation, setEditingEvaluation] = useState<Evaluation | null>(null);
+
+  // Queries
+  const evaluations = useQuery(
+    api.evaluations.getUserEvaluations,
     isAuthenticated && user ? { userId: user.id } : "skip"
   ) ?? [];
 
-  // Convex mutation for adding records
+  const currentEvaluation = useQuery(
+    api.evaluations.getEvaluation,
+    currentEvaluationId ? { evaluationId: currentEvaluationId } : "skip"
+  ) as Evaluation | undefined;
+
+  const records = useQuery(
+    api.testRecords.getEvaluationRecords,
+    isAuthenticated && user && currentEvaluationId
+      ? { userId: user.id, evaluationId: currentEvaluationId }
+      : "skip"
+  ) as TestRecord[] | undefined ?? [];
+
+  // Mutation
   const addRecordMutation = useMutation(api.testRecords.addRecord);
 
-  // Keep local state for inputs/tables (not persisted)
-  const [inputs, setInputs] = useState<InputFields>({
-    orchestratorOut: '',
-    searchIn: '',
-    searchOut: '',
-    screeningIn: ''
-  });
-
-  const [tables, setTables] = useState<StageData>({
-    orchestratorOut: [],
-    searchIn: [],
-    searchOut: [],
-    screeningIn: []
-  });
-
+  // Local state for inputs/tables (not persisted)
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [parsedData, setParsedData] = useState<Record<string, FieldValue[]>>({});
   const [activeTab, setActiveTab] = useState<'input' | 'tables' | 'consolidated'>('input');
-  const [consolidatedStage, setConsolidatedStage] = useState<StageKey>('orchestratorOut');
+  const [selectedTableId, setSelectedTableId] = useState<string>('');
   const [error, setError] = useState('');
   const [testName, setTestName] = useState('Test 1');
-  const [maxItems, setMaxItems] = useState(0); // 0 = no limit
+  const [maxItems, setMaxItems] = useState(0);
+  const [isAdding, setIsAdding] = useState(false);
+
+  // Auto-select first evaluation on load
+  useEffect(() => {
+    if (evaluations.length > 0 && !currentEvaluationId) {
+      // Try to restore from localStorage
+      const savedId = localStorage.getItem('currentEvaluationId');
+      if (savedId && evaluations.some(e => e._id === savedId)) {
+        setCurrentEvaluationId(savedId as Id<"evaluations">);
+      } else {
+        setCurrentEvaluationId(evaluations[0]._id);
+      }
+    }
+  }, [evaluations, currentEvaluationId]);
+
+  // Save current evaluation to localStorage
+  useEffect(() => {
+    if (currentEvaluationId) {
+      localStorage.setItem('currentEvaluationId', currentEvaluationId);
+    }
+  }, [currentEvaluationId]);
+
+  // Auto-select first table when evaluation changes
+  useEffect(() => {
+    if (currentEvaluation?.tables.length && !selectedTableId) {
+      const sortedTables = [...currentEvaluation.tables].sort((a, b) => a.order - b.order);
+      setSelectedTableId(sortedTables[0].id);
+    }
+  }, [currentEvaluation, selectedTableId]);
+
+  // Reset inputs when evaluation changes
+  useEffect(() => {
+    setInputs({});
+    setParsedData({});
+    setSelectedTableId('');
+  }, [currentEvaluationId]);
+
+  const handleInputChange = (tableId: string, value: string) => {
+    setInputs(prev => ({ ...prev, [tableId]: value }));
+  };
 
   const handleParse = () => {
+    if (!currentEvaluation) return;
     setError('');
+
     try {
-      const newTables: StageData = {
-        orchestratorOut: [],
-        searchIn: [],
-        searchOut: [],
-        screeningIn: []
-      };
-      for (const key of Object.keys(inputs) as StageKey[]) {
-        if (inputs[key].trim()) {
-          const parsed = parseYaml(inputs[key]);
-          newTables[key] = flattenObject(parsed, '', maxItems || null);
+      const newParsedData: Record<string, FieldValue[]> = {};
+      for (const table of currentEvaluation.tables) {
+        const inputText = inputs[table.id] || '';
+        if (inputText.trim()) {
+          const parsed = parseYaml(inputText);
+          newParsedData[table.id] = flattenObject(parsed, '', maxItems || null);
         } else {
-          newTables[key] = [];
+          newParsedData[table.id] = [];
         }
       }
-      setTables(newTables);
+      setParsedData(newParsedData);
       setActiveTab('tables');
     } catch (e) {
       setError((e as Error).message);
@@ -302,27 +122,31 @@ export default function App() {
   };
 
   const handleAdd = async () => {
+    if (isAdding) return; // Prevent double-clicks
+
+    if (!currentEvaluation || !user || !currentEvaluationId) {
+      setError('Please select an evaluation and sign in');
+      return;
+    }
+
     if (!testName.trim()) {
       setError('Please enter a test name');
       return;
     }
 
-    const hasData = Object.values(tables).some(t => t.length > 0);
+    const hasData = Object.values(parsedData).some(t => t.length > 0);
     if (!hasData) {
       setError('Please parse data first');
       return;
     }
 
-    if (!user) {
-      setError('Please sign in first');
-      return;
-    }
-
+    setIsAdding(true);
     try {
       await addRecordMutation({
         userId: user.id,
+        evaluationId: currentEvaluationId,
         testName: testName.trim(),
-        data: tables,
+        data: parsedData,
       });
 
       // Auto-increment test name
@@ -332,26 +156,37 @@ export default function App() {
       }
 
       // Clear inputs
-      setInputs({ orchestratorOut: '', searchIn: '', searchOut: '', screeningIn: '' });
-      setTables({ orchestratorOut: [], searchIn: [], searchOut: [], screeningIn: [] });
+      setInputs({});
+      setParsedData({});
       setActiveTab('input');
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setIsAdding(false);
     }
   };
 
   const handleClear = () => {
-    setInputs({ orchestratorOut: '', searchIn: '', searchOut: '', screeningIn: '' });
-    setTables({ orchestratorOut: [], searchIn: [], searchOut: [], screeningIn: [] });
+    setInputs({});
+    setParsedData({});
     setError('');
   };
 
-  const inputFields: Array<{ key: StageKey; label: string; bg: string }> = [
-    { key: 'orchestratorOut', label: 'Orchestrator OUT', bg: 'bg-blue-600' },
-    { key: 'searchIn', label: 'Search IN', bg: 'bg-green-600' },
-    { key: 'searchOut', label: 'Search OUT', bg: 'bg-orange-500' },
-    { key: 'screeningIn', label: 'Screening IN', bg: 'bg-purple-600' }
-  ];
+  const openCreateEvaluation = () => {
+    setEditingEvaluation(null);
+    setShowEvaluationManager(true);
+  };
+
+  const openEditEvaluation = () => {
+    if (currentEvaluation) {
+      setEditingEvaluation(currentEvaluation);
+      setShowEvaluationManager(true);
+    }
+  };
+
+  const handleEvaluationCreated = (id: Id<"evaluations">) => {
+    setCurrentEvaluationId(id);
+  };
 
   if (isLoading) {
     return (
@@ -360,6 +195,8 @@ export default function App() {
       </div>
     );
   }
+
+  const tables = currentEvaluation?.tables || [];
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-3">
@@ -379,40 +216,55 @@ export default function App() {
             <UserButton />
           </SignedIn>
 
-          <input
-            type="text"
-            value={testName}
-            onChange={(e) => setTestName(e.target.value)}
-            className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm w-40"
-            placeholder="Test name"
-          />
+          {/* Evaluation selector */}
+          {isAuthenticated && user && (
+            <EvaluationSelector
+              evaluations={evaluations as Evaluation[]}
+              currentEvaluationId={currentEvaluationId}
+              onSelect={setCurrentEvaluationId}
+              onCreateNew={openCreateEvaluation}
+              onEdit={openEditEvaluation}
+            />
+          )}
+        </div>
 
-          <div className="flex items-center gap-1 text-xs">
-            <span className="text-gray-400">Max items:</span>
-            <select
-              value={maxItems}
-              onChange={(e) => setMaxItems(parseInt(e.target.value))}
-              className="bg-gray-700 border border-gray-600 rounded px-1 py-1 text-sm"
-            >
-              <option value={0}>All</option>
-              <option value={3}>3</option>
-              <option value={5}>5</option>
-              <option value={10}>10</option>
-            </select>
-          </div>
-
-          <div className="flex gap-1">
+        {/* Second row: workflow buttons */}
+        {currentEvaluation && (
+          <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-gray-700">
+            {/* Left side: Input -> Parse -> Tables -> Clear */}
             <button
               onClick={() => setActiveTab('input')}
               className={`px-3 py-1 rounded text-sm font-medium ${activeTab === 'input' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
             >
               Input
             </button>
+            <button onClick={handleParse} className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">
+              Parse
+            </button>
             <button
               onClick={() => setActiveTab('tables')}
               className={`px-3 py-1 rounded text-sm font-medium ${activeTab === 'tables' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
             >
               Tables
+            </button>
+            <button onClick={handleClear} className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-sm font-medium">
+              Clear
+            </button>
+
+            {/* Spacer */}
+            <div className="w-8" />
+
+            {/* Right side: Add -> Consolidated */}
+            <button
+              onClick={handleAdd}
+              disabled={isAdding}
+              className={`px-3 py-1 rounded text-sm font-medium ${
+                isAdding
+                  ? 'bg-gray-600 cursor-not-allowed'
+                  : 'bg-yellow-600 hover:bg-yellow-500'
+              }`}
+            >
+              {isAdding ? 'Adding...' : '+ Add'}
             </button>
             <button
               onClick={() => setActiveTab('consolidated')}
@@ -421,74 +273,91 @@ export default function App() {
               Consolidated ({records.length})
             </button>
           </div>
+        )}
 
-          <button onClick={handleParse} className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-sm font-medium">
-            Parse
-          </button>
-          <button
-            onClick={handleAdd}
-            className={`px-3 py-1 rounded text-sm font-medium ${isAuthenticated ? 'bg-yellow-600 hover:bg-yellow-500' : 'bg-gray-600 cursor-not-allowed'}`}
-            disabled={!isAuthenticated}
-          >
-            + Add
-          </button>
-          <button onClick={handleClear} className="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-sm font-medium">
-            Clear
-          </button>
-        </div>
+        {/* Third row: Test name and options */}
+        {currentEvaluation && (
+          <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-gray-700">
+            <input
+              type="text"
+              value={testName}
+              onChange={(e) => setTestName(e.target.value)}
+              className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm w-40"
+              placeholder="Test name"
+            />
+
+            <div className="flex items-center gap-1 text-xs">
+              <span className="text-gray-400">Max items:</span>
+              <select
+                value={maxItems}
+                onChange={(e) => setMaxItems(parseInt(e.target.value))}
+                className="bg-gray-700 border border-gray-600 rounded px-1 py-1 text-sm"
+              >
+                <option value={0}>All</option>
+                <option value={3}>3</option>
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+              </select>
+            </div>
+          </div>
+        )}
+
         {error && <div className="bg-red-900 text-red-200 px-3 py-1 rounded text-sm mt-2">{error}</div>}
+
         {!isAuthenticated && (
           <div className="bg-blue-900 text-blue-200 px-3 py-1 rounded text-sm mt-2">
-            Sign in to save and persist your test records
+            Sign in to create evaluations and save test records
+          </div>
+        )}
+
+        {isAuthenticated && evaluations.length === 0 && (
+          <div className="bg-yellow-900 text-yellow-200 px-3 py-1 rounded text-sm mt-2">
+            Create your first evaluation to get started
           </div>
         )}
       </div>
 
-      {activeTab === 'input' && (
-        <div className="grid grid-cols-2 gap-3">
-          {inputFields.map(({ key, label, bg }) => (
-            <div key={key} className="bg-gray-800 rounded-lg overflow-hidden">
-              <div className={`${bg} px-3 py-1.5 text-sm font-medium`}>{label}</div>
-              <textarea
-                value={inputs[key]}
-                onChange={(e) => setInputs({ ...inputs, [key]: e.target.value })}
-                className="w-full h-44 bg-gray-900 font-mono text-xs p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-200"
-                placeholder={`Paste ${label} YAML...`}
-              />
-            </div>
-          ))}
-        </div>
+      {/* Main content */}
+      {currentEvaluation && tables.length > 0 && (
+        <>
+          {activeTab === 'input' && (
+            <DynamicInputPanel
+              tables={tables}
+              inputs={inputs}
+              onInputChange={handleInputChange}
+            />
+          )}
+
+          {activeTab === 'tables' && (
+            <DynamicTablesView
+              tables={tables}
+              parsedData={parsedData}
+            />
+          )}
+
+          {activeTab === 'consolidated' && (
+            <ConsolidatedTable
+              records={records}
+              tables={tables}
+              selectedTableId={selectedTableId || tables[0]?.id || ''}
+              onTableSelect={setSelectedTableId}
+            />
+          )}
+        </>
       )}
 
-      {activeTab === 'tables' && (
-        <div className="grid grid-cols-2 gap-3">
-          {inputFields.map(({ key, label, bg }) => (
-            <div key={key} className="bg-gray-800 rounded-lg overflow-hidden">
-              <div className={`${bg} px-3 py-1.5 text-sm font-medium flex justify-between`}>
-                <span>{label}</span>
-                <span className="text-xs opacity-75">{tables[key]?.length || 0} rows</span>
-              </div>
-              <DataTable data={tables[key]} />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {activeTab === 'consolidated' && (
-        <div className="bg-gray-800 rounded-lg overflow-hidden">
-          <div className="flex gap-1 p-2 bg-gray-700">
-            {inputFields.map(({ key, label, bg }) => (
-              <button
-                key={key}
-                onClick={() => setConsolidatedStage(key)}
-                className={`px-3 py-1 rounded text-xs font-medium ${consolidatedStage === key ? bg : 'bg-gray-600 hover:bg-gray-500'}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <ConsolidatedTable records={records} stage={consolidatedStage} />
-        </div>
+      {/* Evaluation Manager Modal */}
+      {user && (
+        <EvaluationManager
+          isOpen={showEvaluationManager}
+          onClose={() => {
+            setShowEvaluationManager(false);
+            setEditingEvaluation(null);
+          }}
+          evaluation={editingEvaluation}
+          userId={user.id}
+          onCreated={handleEvaluationCreated}
+        />
       )}
     </div>
   );
