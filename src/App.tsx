@@ -14,6 +14,7 @@ import {
 import { FieldValue, Evaluation, TestRecord } from './types/evaluation';
 import { parseYaml } from './utils/yamlParser';
 import { flattenObject } from './utils/dataFlattener';
+
 import { EvaluationSelector } from './components/evaluation/EvaluationSelector';
 import { EvaluationManager } from './components/evaluation/EvaluationManager';
 import { DynamicInputPanel } from './components/input/DynamicInputPanel';
@@ -35,14 +36,16 @@ export default function App() {
     isAuthenticated && user ? { userId: user.id } : "skip"
   ) ?? [];
 
+  // Skip Convex query if it's a guest evaluation ID
+  const isGuestEvaluationId = currentEvaluationId?.toString().startsWith('guest');
   const currentEvaluation = useQuery(
     api.evaluations.getEvaluation,
-    currentEvaluationId ? { evaluationId: currentEvaluationId } : "skip"
+    currentEvaluationId && !isGuestEvaluationId ? { evaluationId: currentEvaluationId } : "skip"
   ) as Evaluation | undefined;
 
   const records = useQuery(
     api.testRecords.getEvaluationRecords,
-    isAuthenticated && user && currentEvaluationId
+    isAuthenticated && user && currentEvaluationId && !isGuestEvaluationId
       ? { userId: user.id, evaluationId: currentEvaluationId }
       : "skip"
   ) as TestRecord[] | undefined ?? [];
@@ -60,18 +63,69 @@ export default function App() {
   const [maxItems, setMaxItems] = useState(0);
   const [isAdding, setIsAdding] = useState(false);
 
+  // Guest mode: local storage for evaluations and records
+  const [guestEvaluations, setGuestEvaluations] = useState<Evaluation[]>(() => {
+    try {
+      const saved = localStorage.getItem('guestEvaluations');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          // Filter out old default guest evaluation
+          return parsed.filter((e: Evaluation) => e._id !== 'guest');
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return [];
+  });
+  const [guestRecords, setGuestRecords] = useState<TestRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('guestRecords');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return [];
+  });
+
+  // Persist guest data to localStorage
+  useEffect(() => {
+    localStorage.setItem('guestEvaluations', JSON.stringify(guestEvaluations));
+  }, [guestEvaluations]);
+
+  useEffect(() => {
+    localStorage.setItem('guestRecords', JSON.stringify(guestRecords));
+  }, [guestRecords]);
+
+  // Determine if we're in guest mode (only after loading is complete)
+  const isGuest = !isLoading && !isAuthenticated;
+
+  // When user logs in, clear guest evaluation ID so auto-select picks a real one
+  useEffect(() => {
+    if (isAuthenticated && currentEvaluationId?.toString().startsWith('guest')) {
+      setCurrentEvaluationId(null);
+    }
+  }, [isAuthenticated, currentEvaluationId]);
+
   // Auto-select first evaluation on load
   useEffect(() => {
-    if (evaluations.length > 0 && !currentEvaluationId) {
+    const availableEvaluations = isGuest ? guestEvaluations : evaluations;
+    if (availableEvaluations.length > 0 && !currentEvaluationId) {
       // Try to restore from localStorage
       const savedId = localStorage.getItem('currentEvaluationId');
-      if (savedId && evaluations.some(e => e._id === savedId)) {
+      if (savedId && availableEvaluations.some(e => e._id === savedId)) {
         setCurrentEvaluationId(savedId as Id<"evaluations">);
       } else {
-        setCurrentEvaluationId(evaluations[0]._id);
+        setCurrentEvaluationId(availableEvaluations[0]._id);
       }
     }
-  }, [evaluations, currentEvaluationId]);
+  }, [evaluations, guestEvaluations, currentEvaluationId, isGuest]);
 
   // Save current evaluation to localStorage
   useEffect(() => {
@@ -82,11 +136,14 @@ export default function App() {
 
   // Auto-select first table when evaluation changes
   useEffect(() => {
-    if (currentEvaluation?.tables.length && !selectedTableId) {
-      const sortedTables = [...currentEvaluation.tables].sort((a, b) => a.order - b.order);
+    const evaluation = isGuest
+      ? guestEvaluations.find(e => e._id === currentEvaluationId)
+      : currentEvaluation;
+    if (evaluation?.tables.length && !selectedTableId) {
+      const sortedTables = [...evaluation.tables].sort((a, b) => a.order - b.order);
       setSelectedTableId(sortedTables[0].id);
     }
-  }, [currentEvaluation, selectedTableId]);
+  }, [currentEvaluation, selectedTableId, isGuest, guestEvaluations, currentEvaluationId]);
 
   // Reset inputs when evaluation changes
   useEffect(() => {
@@ -100,12 +157,15 @@ export default function App() {
   };
 
   const handleParse = () => {
-    if (!currentEvaluation) return;
+    const evaluation = isGuest
+      ? guestEvaluations.find(e => e._id === currentEvaluationId)
+      : currentEvaluation;
+    if (!evaluation) return;
     setError('');
 
     try {
       const newParsedData: Record<string, FieldValue[]> = {};
-      for (const table of currentEvaluation.tables) {
+      for (const table of evaluation.tables) {
         const inputText = inputs[table.id] || '';
         if (inputText.trim()) {
           const parsed = parseYaml(inputText);
@@ -124,8 +184,12 @@ export default function App() {
   const handleAdd = async () => {
     if (isAdding) return; // Prevent double-clicks
 
-    if (!currentEvaluation || !user || !currentEvaluationId) {
-      setError('Please select an evaluation and sign in');
+    const activeEvaluation = isGuest
+      ? guestEvaluations.find(e => e._id === currentEvaluationId)
+      : currentEvaluation;
+
+    if (!activeEvaluation) {
+      setError('Please select an evaluation');
       return;
     }
 
@@ -142,12 +206,27 @@ export default function App() {
 
     setIsAdding(true);
     try {
-      await addRecordMutation({
-        userId: user.id,
-        evaluationId: currentEvaluationId,
-        testName: testName.trim(),
-        data: parsedData,
-      });
+      if (isGuest) {
+        // Guest mode: store locally (session only)
+        const newRecord: TestRecord = {
+          _id: `guest-record-${Date.now()}` as any,
+          _creationTime: Date.now(),
+          userId: 'guest',
+          evaluationId: currentEvaluationId!,
+          testName: testName.trim(),
+          createdAt: Date.now(),
+          data: parsedData,
+        };
+        setGuestRecords(prev => [...prev, newRecord]);
+      } else {
+        // Authenticated: save to Convex
+        await addRecordMutation({
+          userId: user!.id,
+          evaluationId: currentEvaluationId!,
+          testName: testName.trim(),
+          data: parsedData,
+        });
+      }
 
       // Auto-increment test name
       const match = testName.match(/^(.*?)(\d+)$/);
@@ -178,14 +257,39 @@ export default function App() {
   };
 
   const openEditEvaluation = () => {
-    if (currentEvaluation) {
-      setEditingEvaluation(currentEvaluation);
+    // Get the active evaluation for both guest and authenticated users
+    const evalToEdit = isGuest
+      ? guestEvaluations.find(e => e._id === currentEvaluationId)
+      : currentEvaluation;
+    if (evalToEdit) {
+      setEditingEvaluation(evalToEdit);
       setShowEvaluationManager(true);
     }
   };
 
   const handleEvaluationCreated = (id: Id<"evaluations">) => {
     setCurrentEvaluationId(id);
+  };
+
+  // Guest mode handlers for evaluations
+  const handleGuestCreateEvaluation = (evaluation: Evaluation) => {
+    setGuestEvaluations(prev => [...prev, evaluation]);
+  };
+
+  const handleGuestUpdateEvaluation = (updatedEvaluation: Evaluation) => {
+    setGuestEvaluations(prev =>
+      prev.map(e => e._id === updatedEvaluation._id ? updatedEvaluation : e)
+    );
+  };
+
+  const handleGuestDeleteEvaluation = (evaluationId: string) => {
+    setGuestEvaluations(prev => prev.filter(e => e._id !== evaluationId));
+    setGuestRecords(prev => prev.filter(r => r.evaluationId !== evaluationId));
+    // Select another evaluation if current was deleted
+    if (currentEvaluationId === evaluationId) {
+      const remaining = guestEvaluations.filter(e => e._id !== evaluationId);
+      setCurrentEvaluationId(remaining[0]?._id || null);
+    }
   };
 
   if (isLoading) {
@@ -196,7 +300,15 @@ export default function App() {
     );
   }
 
-  const tables = currentEvaluation?.tables || [];
+  // Use guest evaluations when not authenticated
+  const activeEvaluation = isGuest
+    ? guestEvaluations.find(e => e._id === currentEvaluationId) || guestEvaluations[0]
+    : currentEvaluation;
+  const activeRecords = isGuest
+    ? guestRecords.filter(r => r.evaluationId === currentEvaluationId)
+    : records;
+  const activeEvaluations = isGuest ? guestEvaluations : evaluations;
+  const tables = activeEvaluation?.tables || [];
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-3">
@@ -216,20 +328,18 @@ export default function App() {
             <UserButton />
           </SignedIn>
 
-          {/* Evaluation selector */}
-          {isAuthenticated && user && (
-            <EvaluationSelector
-              evaluations={evaluations as Evaluation[]}
-              currentEvaluationId={currentEvaluationId}
-              onSelect={setCurrentEvaluationId}
-              onCreateNew={openCreateEvaluation}
-              onEdit={openEditEvaluation}
-            />
-          )}
+          {/* Evaluation selector - shown for both guests and authenticated users */}
+          <EvaluationSelector
+            evaluations={activeEvaluations as Evaluation[]}
+            currentEvaluationId={currentEvaluationId}
+            onSelect={setCurrentEvaluationId}
+            onCreateNew={openCreateEvaluation}
+            onEdit={openEditEvaluation}
+          />
         </div>
 
         {/* Second row: workflow buttons */}
-        {currentEvaluation && (
+        {activeEvaluation && (
           <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-gray-700">
             {/* Left side: Input -> Parse -> Tables -> Clear */}
             <button
@@ -270,13 +380,13 @@ export default function App() {
               onClick={() => setActiveTab('consolidated')}
               className={`px-3 py-1 rounded text-sm font-medium ${activeTab === 'consolidated' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
             >
-              Consolidated ({records.length})
+              Consolidated ({activeRecords.length})
             </button>
           </div>
         )}
 
         {/* Third row: Test name and options */}
-        {currentEvaluation && (
+        {activeEvaluation && (
           <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-gray-700">
             <input
               type="text"
@@ -304,9 +414,9 @@ export default function App() {
 
         {error && <div className="bg-red-900 text-red-200 px-3 py-1 rounded text-sm mt-2">{error}</div>}
 
-        {!isAuthenticated && (
+        {isGuest && (
           <div className="bg-blue-900 text-blue-200 px-3 py-1 rounded text-sm mt-2">
-            Sign in to create evaluations and save test records
+            Guest mode: Data is stored locally for this session only. Sign in to save permanently.
           </div>
         )}
 
@@ -318,7 +428,7 @@ export default function App() {
       </div>
 
       {/* Main content */}
-      {currentEvaluation && tables.length > 0 && (
+      {activeEvaluation && tables.length > 0 && (
         <>
           {activeTab === 'input' && (
             <DynamicInputPanel
@@ -337,7 +447,7 @@ export default function App() {
 
           {activeTab === 'consolidated' && (
             <ConsolidatedTable
-              records={records}
+              records={activeRecords}
               tables={tables}
               selectedTableId={selectedTableId || tables[0]?.id || ''}
               onTableSelect={setSelectedTableId}
@@ -347,18 +457,20 @@ export default function App() {
       )}
 
       {/* Evaluation Manager Modal */}
-      {user && (
-        <EvaluationManager
-          isOpen={showEvaluationManager}
-          onClose={() => {
-            setShowEvaluationManager(false);
-            setEditingEvaluation(null);
-          }}
-          evaluation={editingEvaluation}
-          userId={user.id}
-          onCreated={handleEvaluationCreated}
-        />
-      )}
+      <EvaluationManager
+        isOpen={showEvaluationManager}
+        onClose={() => {
+          setShowEvaluationManager(false);
+          setEditingEvaluation(null);
+        }}
+        evaluation={editingEvaluation}
+        userId={user?.id || 'guest'}
+        onCreated={handleEvaluationCreated}
+        isGuest={isGuest}
+        onGuestCreate={handleGuestCreateEvaluation}
+        onGuestUpdate={handleGuestUpdateEvaluation}
+        onGuestDelete={handleGuestDeleteEvaluation}
+      />
     </div>
   );
 }

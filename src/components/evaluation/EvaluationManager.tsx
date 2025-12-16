@@ -11,6 +11,11 @@ interface EvaluationManagerProps {
   evaluation?: Evaluation | null;  // If editing, undefined/null for create
   userId: string;
   onCreated?: (id: Id<"evaluations">) => void;
+  // Guest mode handlers
+  isGuest?: boolean;
+  onGuestCreate?: (evaluation: Evaluation) => void;
+  onGuestUpdate?: (evaluation: Evaluation) => void;
+  onGuestDelete?: (evaluationId: string) => void;
 }
 
 export const EvaluationManager = ({
@@ -19,6 +24,10 @@ export const EvaluationManager = ({
   evaluation,
   userId,
   onCreated,
+  isGuest,
+  onGuestCreate,
+  onGuestUpdate,
+  onGuestDelete,
 }: EvaluationManagerProps) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -71,21 +80,50 @@ export const EvaluationManager = ({
     }
 
     try {
-      if (isEditing) {
-        await updateEvaluation({
-          evaluationId: evaluation._id,
-          name: name.trim(),
-          description: description.trim() || undefined,
-          tables,
-        });
+      if (isGuest) {
+        // Guest mode: use local handlers
+        const now = Date.now();
+        if (isEditing && evaluation) {
+          const updatedEvaluation: Evaluation = {
+            ...evaluation,
+            name: name.trim(),
+            description: description.trim() || undefined,
+            tables,
+            updatedAt: now,
+          };
+          onGuestUpdate?.(updatedEvaluation);
+        } else {
+          const newEvaluation: Evaluation = {
+            _id: `guest-eval-${now}` as Id<"evaluations">,
+            _creationTime: now,
+            userId,
+            name: name.trim(),
+            description: description.trim() || undefined,
+            createdAt: now,
+            updatedAt: now,
+            tables,
+          };
+          onGuestCreate?.(newEvaluation);
+          onCreated?.(newEvaluation._id);
+        }
       } else {
-        const newId = await createEvaluation({
-          userId,
-          name: name.trim(),
-          description: description.trim() || undefined,
-          tables,
-        });
-        onCreated?.(newId);
+        // Authenticated mode: use Convex
+        if (isEditing) {
+          await updateEvaluation({
+            evaluationId: evaluation._id,
+            name: name.trim(),
+            description: description.trim() || undefined,
+            tables,
+          });
+        } else {
+          const newId = await createEvaluation({
+            userId,
+            name: name.trim(),
+            description: description.trim() || undefined,
+            tables,
+          });
+          onCreated?.(newId);
+        }
       }
       onClose();
     } catch (err) {
@@ -102,7 +140,11 @@ export const EvaluationManager = ({
     }
 
     try {
-      await deleteEvaluation({ evaluationId: evaluation._id });
+      if (isGuest) {
+        onGuestDelete?.(evaluation._id as string);
+      } else {
+        await deleteEvaluation({ evaluationId: evaluation._id });
+      }
       onClose();
     } catch (err) {
       setError((err as Error).message);
