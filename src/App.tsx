@@ -53,6 +53,7 @@ export default function App() {
   // Mutation
   const addRecordMutation = useMutation(api.testRecords.addRecord);
   const updateRecordMutation = useMutation(api.testRecords.updateRecord);
+  const deleteRecordMutation = useMutation(api.testRecords.deleteRecord);
 
   // Local state for inputs/tables (not persisted)
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -259,6 +260,16 @@ export default function App() {
     }
   };
 
+  const handleDeleteTest = async (recordId: string) => {
+    if (isGuest) {
+      setGuestRecords(prev => prev.filter(r => r._id !== recordId));
+    } else {
+      await deleteRecordMutation({
+        recordId: recordId as Id<"testRecords">,
+      });
+    }
+  };
+
   const handleClear = () => {
     setInputs({});
     setParsedData({});
@@ -383,8 +394,8 @@ export default function App() {
               onClick={handleAdd}
               disabled={isAdding}
               className={`px-3 py-1 rounded text-sm font-medium ${isAdding
-                  ? 'bg-gray-600 cursor-not-allowed'
-                  : 'bg-yellow-600 hover:bg-yellow-500'
+                ? 'bg-gray-600 cursor-not-allowed'
+                : 'bg-yellow-600 hover:bg-yellow-500'
                 }`}
             >
               {isAdding ? 'Adding...' : '+ Add'}
@@ -465,6 +476,7 @@ export default function App() {
               selectedTableId={selectedTableId || tables[0]?.id || ''}
               onTableSelect={setSelectedTableId}
               onRenameTest={handleRenameTest}
+              onDeleteTest={handleDeleteTest}
             />
           )}
         </>
