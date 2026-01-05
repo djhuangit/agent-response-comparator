@@ -52,6 +52,7 @@ export default function App() {
 
   // Mutation
   const addRecordMutation = useMutation(api.testRecords.addRecord);
+  const updateRecordMutation = useMutation(api.testRecords.updateRecord);
 
   // Local state for inputs/tables (not persisted)
   const [inputs, setInputs] = useState<Record<string, string>>({});
@@ -245,6 +246,19 @@ export default function App() {
     }
   };
 
+  const handleRenameTest = async (recordId: string, newName: string) => {
+    if (isGuest) {
+      setGuestRecords(prev => prev.map(r =>
+        r._id === recordId ? { ...r, testName: newName } : r
+      ));
+    } else {
+      await updateRecordMutation({
+        recordId: recordId as Id<"testRecords">,
+        testName: newName,
+      });
+    }
+  };
+
   const handleClear = () => {
     setInputs({});
     setParsedData({});
@@ -368,11 +382,10 @@ export default function App() {
             <button
               onClick={handleAdd}
               disabled={isAdding}
-              className={`px-3 py-1 rounded text-sm font-medium ${
-                isAdding
+              className={`px-3 py-1 rounded text-sm font-medium ${isAdding
                   ? 'bg-gray-600 cursor-not-allowed'
                   : 'bg-yellow-600 hover:bg-yellow-500'
-              }`}
+                }`}
             >
               {isAdding ? 'Adding...' : '+ Add'}
             </button>
@@ -451,6 +464,7 @@ export default function App() {
               tables={tables}
               selectedTableId={selectedTableId || tables[0]?.id || ''}
               onTableSelect={setSelectedTableId}
+              onRenameTest={handleRenameTest}
             />
           )}
         </>

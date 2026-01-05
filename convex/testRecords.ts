@@ -48,3 +48,16 @@ export const deleteRecord = mutation({
     await ctx.db.delete(args.recordId);
   },
 });
+
+// Update a test record (e.g. rename it)
+export const updateRecord = mutation({
+  args: {
+    recordId: v.id("testRecords"),
+    testName: v.optional(v.string()),
+    // We can add more fields here if needed later
+  },
+  handler: async (ctx, args) => {
+    const { recordId, ...fields } = args;
+    await ctx.db.patch(recordId, fields);
+  },
+});

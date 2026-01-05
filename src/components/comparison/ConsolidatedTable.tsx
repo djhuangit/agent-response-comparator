@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { TableDefinition, TestRecord, FieldValue } from '../../types/evaluation';
 
 interface ConsolidatedTableProps {
@@ -12,12 +13,37 @@ export const ConsolidatedTable = ({
   tables,
   selectedTableId,
   onTableSelect,
-}: ConsolidatedTableProps) => {
+  onRenameTest,
+}: ConsolidatedTableProps & { onRenameTest: (recordId: string, newName: string) => void }) => {
   // Sort tables by order for the selector buttons
   const sortedTables = [...tables].sort((a, b) => a.order - b.order);
 
   // Reverse records so newer ones appear on the right (records come in desc order)
   const orderedRecords = [...records].reverse();
+
+  // State for editing test name
+  const [editingTestId, setEditingTestId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+
+  const handleStartEdit = (record: TestRecord) => {
+    setEditingTestId(record._id);
+    setEditValue(record.testName);
+  };
+
+  const handleSaveEdit = () => {
+    if (editingTestId && editValue.trim()) {
+      onRenameTest(editingTestId, editValue.trim());
+    }
+    setEditingTestId(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleSaveEdit();
+    } else if (e.key === 'Escape') {
+      setEditingTestId(null);
+    }
+  };
 
   if (records.length === 0) {
     return (
@@ -27,9 +53,8 @@ export const ConsolidatedTable = ({
             <button
               key={table.id}
               onClick={() => onTableSelect(table.id)}
-              className={`px-3 py-1 rounded text-xs font-medium ${
-                selectedTableId === table.id ? table.color : 'bg-gray-600 hover:bg-gray-500'
-              }`}
+              className={`px-3 py-1 rounded text-xs font-medium ${selectedTableId === table.id ? table.color : 'bg-gray-600 hover:bg-gray-500'
+                }`}
             >
               {table.name}
             </button>
@@ -67,9 +92,8 @@ export const ConsolidatedTable = ({
           <button
             key={table.id}
             onClick={() => onTableSelect(table.id)}
-            className={`px-3 py-1 rounded text-xs font-medium ${
-              selectedTableId === table.id ? table.color : 'bg-gray-600 hover:bg-gray-500'
-            }`}
+            className={`px-3 py-1 rounded text-xs font-medium ${selectedTableId === table.id ? table.color : 'bg-gray-600 hover:bg-gray-500'
+              }`}
           >
             {table.name}
           </button>
@@ -87,8 +111,29 @@ export const ConsolidatedTable = ({
               <tr className="bg-gray-700 text-white">
                 <th className="text-left p-1.5 border border-gray-600 font-medium min-w-48">Field</th>
                 {orderedRecords.map((r) => (
-                  <th key={r._id} className="text-left p-1.5 border border-gray-600 font-medium min-w-40">
-                    {r.testName}
+                  <th key={r._id} className="text-left p-1.5 border border-gray-600 font-medium min-w-40 group relative">
+                    {editingTestId === r._id ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onBlur={handleSaveEdit}
+                        onKeyDown={handleKeyDown}
+                        className="bg-gray-600 text-white px-1 py-0.5 rounded w-full outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    ) : (
+                      <div
+                        onClick={() => handleStartEdit(r)}
+                        className="flex items-center gap-2 cursor-pointer hover:bg-gray-600 px-1 -mx-1 rounded"
+                        title="Click to rename"
+                      >
+                        <span>{r.testName}</span>
+                        <svg className="w-3 h-3 text-gray-400 opacity-0 group-hover:opacity-100" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                      </div>
+                    )}
                   </th>
                 ))}
               </tr>
